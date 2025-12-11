@@ -1,0 +1,394 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Zener Diode Regulator</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f4f4f9;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 20px;
+        }
+
+        h1 { color: #333; }
+
+        .container {
+            background: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            max-width: 800px;
+            width: 100%;
+        }
+
+        canvas {
+            background-color: #fff;
+            border: 2px solid #333;
+            border-radius: 4px;
+            display: block;
+            margin: 0 auto;
+            cursor: pointer;
+        }
+
+        .controls {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #eee;
+            border-radius: 8px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+        }
+
+        label {
+            font-weight: bold;
+            margin-bottom: 5px;
+            color: #444;
+        }
+
+        input[type=range] {
+            width: 100%;
+            cursor: pointer;
+        }
+
+        .readout {
+            font-size: 1.2rem;
+            color: #007bff;
+            font-weight: bold;
+            margin-top: 5px;
+        }
+
+        .status-panel {
+            margin-top: 20px;
+            padding: 15px;
+            background: #e8f4ff;
+            border-left: 5px solid #007bff;
+            border-radius: 4px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 1.1rem;
+        }
+        
+        .explanation {
+            margin-top: 20px;
+            font-size: 0.9rem;
+            color: #666;
+            line-height: 1.5;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="container">
+        <h1>Zener Diode Regulator</h1>
+        
+        <canvas id="circuitCanvas" width="600" height="350"></canvas>
+
+        <div class="controls">
+            <div class="control-group">
+                <label>Input Voltage ($V_{in}$)</label>
+                <input type="range" id="vinSlider" min="0" max="20" step="0.1" value="9">
+                <div class="readout"><span id="vinValue">9.0</span> V</div>
+            </div>
+            <div class="control-group">
+                <label>Series Resistor ($R$)</label>
+                <input type="range" id="resSlider" min="100" max="2000" step="10" value="220">
+                <div class="readout"><span id="resValue">220</span> &Omega;</div>
+            </div>
+        </div>
+
+        <div class="status-panel">
+            <div class="status-item">
+                <span>Output Voltage ($V_{out}$):</span>
+                <span id="voutDisplay">--</span>
+            </div>
+            <div class="status-item">
+                <span>Zener Current ($I_z$):</span>
+                <span id="currentDisplay">--</span>
+            </div>
+            <div class="status-item">
+                <span>Zener State:</span>
+                <span id="stateDisplay" style="font-weight:bold;">--</span>
+            </div>
+        </div>
+
+        <div class="explanation">
+            <p><strong>How it works:</strong> The Zener diode is set to breakdown at <strong>5.1V</strong>. <br>
+            &bull; If Input < 5.1V: The diode blocks current. $V_{out}$ follows $V_{in}$.<br>
+            &bull; If Input > 5.1V: The diode conducts (breakdown) to keep $V_{out}$ stable at 5.1V. The excess voltage is dropped across the Resistor.</p>
+        </div>
+    </div>
+
+<script>
+    const canvas = document.getElementById('circuitCanvas');
+    const ctx = canvas.getContext('2d');
+
+    // DOM Elements
+    const vinSlider = document.getElementById('vinSlider');
+    const resSlider = document.getElementById('resSlider');
+    const vinValue = document.getElementById('vinValue');
+    const resValue = document.getElementById('resValue');
+    const voutDisplay = document.getElementById('voutDisplay');
+    const currentDisplay = document.getElementById('currentDisplay');
+    const stateDisplay = document.getElementById('stateDisplay');
+
+    // Circuit Constants
+    const ZENER_VOLTAGE = 5.1; // Vz
+
+    // Animation State
+    let electrons = [];
+    let animationSpeed = 0; // Proportional to current
+    let lastTime = 0;
+
+    // Initialize Electrons (Positions along the wire path)
+    // Path: Battery(+) -> Resistor -> Zener -> Ground -> Battery(-)
+    // We will define the path as a series of points
+    const wirePath = [
+        {x: 100, y: 250}, // Battery Bottom (Ground)
+        {x: 100, y: 100}, // Battery Top
+        {x: 250, y: 100}, // Resistor Start
+        {x: 350, y: 100}, // Resistor End
+        {x: 450, y: 100}, // Junction Top
+        {x: 450, y: 250}, // Junction Bottom (Ground)
+        {x: 100, y: 250}  // Back to Battery
+    ];
+
+    // Create initial electron pool
+    for(let i=0; i<20; i++) {
+        electrons.push({
+            segment: 0, // current wire segment index
+            progress: i * (1/20), // 0 to 1 progress along segment (staggered)
+            active: true
+        });
+    }
+
+    function updatePhysics() {
+        const vin = parseFloat(vinSlider.value);
+        const r = parseFloat(resSlider.value);
+
+        vinValue.innerText = vin.toFixed(1);
+        resValue.innerText = r.toFixed(0);
+
+        let vout, current, state, color;
+
+        if (vin > ZENER_VOLTAGE) {
+            // Zener is conducting (Regulating)
+            vout = ZENER_VOLTAGE;
+            // I = (Vin - Vz) / R
+            current = (vin - ZENER_VOLTAGE) / r; 
+            state = "REGULATING (ON)";
+            color = "#28a745"; // Green
+        } else {
+            // Zener is blocking (Off)
+            vout = vin;
+            current = 0; // Ideal zener has 0 current before breakdown
+            state = "BLOCKING (OFF)";
+            color = "#dc3545"; // Red
+        }
+
+        // Update Displays
+        voutDisplay.innerText = vout.toFixed(2) + " V";
+        currentDisplay.innerText = (current * 1000).toFixed(1) + " mA"; // Show in mA
+        stateDisplay.innerText = state;
+        stateDisplay.style.color = color;
+
+        // Update Animation Speed
+        // Scale speed for visual effect (0.02 is base speed factor)
+        // If current is 0, speed is 0.
+        animationSpeed = current * 20; 
+    }
+
+    function drawCircuit() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        ctx.lineWidth = 4;
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.strokeStyle = '#000';
+
+        // 1. Draw Wires (Main Loop)
+        ctx.beginPath();
+        ctx.moveTo(100, 250); // Bat (-)
+        ctx.lineTo(100, 100); // Bat (+)
+        ctx.lineTo(250, 100); // Wire to Resistor
+        ctx.moveTo(350, 100); // Resistor to Junction
+        ctx.lineTo(550, 100); // Junction to Output Top
+        ctx.moveTo(450, 100); // Junction Top
+        ctx.lineTo(450, 150); // To Zener
+        ctx.moveTo(450, 200); // From Zener
+        ctx.lineTo(450, 250); // To Ground line
+        ctx.lineTo(100, 250); // Back to Bat
+        ctx.lineTo(550, 250); // To Output Bottom
+        ctx.stroke();
+
+        // 2. Draw Components
+
+        // Battery Symbol
+        ctx.fillStyle = "#fff";
+        ctx.fillRect(80, 160, 40, 30); // Clear wire behind battery
+        // Long line (+)
+        ctx.beginPath();
+        ctx.moveTo(80, 165);
+        ctx.lineTo(120, 165);
+        ctx.stroke();
+        // Short line (-)
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(90, 185);
+        ctx.lineTo(110, 185);
+        ctx.stroke();
+        ctx.lineWidth = 4;
+        // Text + and -
+        ctx.font = "24px Arial";
+        ctx.fillStyle = "#000";
+        ctx.fillText("+", 130, 170);
+        ctx.fillText("-", 130, 200);
+
+        // Resistor Symbol (Zigzag)
+        ctx.beginPath();
+        ctx.moveTo(250, 100);
+        ctx.lineTo(260, 80);
+        ctx.lineTo(280, 120);
+        ctx.lineTo(300, 80);
+        ctx.lineTo(320, 120);
+        ctx.lineTo(340, 80);
+        ctx.lineTo(350, 100);
+        ctx.stroke();
+        
+        // Zener Diode Symbol
+        // Triangle
+        ctx.beginPath();
+        ctx.moveTo(420, 200);
+        ctx.lineTo(480, 200);
+        ctx.lineTo(450, 150);
+        ctx.closePath();
+        ctx.fillStyle = "#fff"; // Fill white to hide wire behind
+        ctx.fill(); 
+        ctx.stroke();
+        // Z-Bar
+        ctx.beginPath();
+        ctx.moveTo(420, 150); // Left wing down
+        ctx.lineTo(420, 140); 
+        ctx.lineTo(480, 140); // Horizontal bar
+        ctx.lineTo(480, 130); // Right wing up
+        // Actually Zener symbol is usually just the bar with wings
+        // Let's redraw standard Zener cathode bar
+        ctx.clearRect(410, 130, 80, 25); // Clear area
+        ctx.beginPath();
+        ctx.moveTo(420, 160); // Little hook left
+        ctx.lineTo(420, 150);
+        ctx.lineTo(480, 150); // Main bar
+        ctx.lineTo(480, 140); // Little hook right
+        ctx.stroke();
+
+
+        // Labels
+        ctx.font = "20px Arial";
+        ctx.fillStyle = "#000";
+        ctx.fillText("Input", 30, 50);
+        ctx.fillText("Voltage", 30, 75);
+        
+        ctx.fillText("Series", 270, 40);
+        ctx.fillText("Resistor (R)", 250, 65);
+
+        ctx.fillText("Zener", 490, 160);
+        ctx.fillText("Diode (5.1V)", 490, 185);
+
+        ctx.fillText("Stable Output", 460, 290);
+        ctx.fillText("Voltage", 490, 315);
+    }
+
+    function animate(timestamp) {
+        // Calculate physics first
+        updatePhysics();
+        
+        // Draw Static Circuit
+        drawCircuit();
+
+        // Draw Electrons (Flow animation)
+        // If current > 0, we move electrons.
+        // Current flows + to - in schematic (Conventional), 
+        // but user asked for Electron Flow (- to +). 
+        // However, standard diagrams use Arrows for Current. 
+        // To prevent confusion with the User's Image Arrows, 
+        // I will animate Conventional Current (Dots moving + to -).
+        
+        if (animationSpeed > 0) {
+            ctx.fillStyle = "#ffcc00"; // Yellow dots for visibility
+            
+            for(let p of electrons) {
+                // Draw dot
+                let pos = getPositionOnPath(p.segment, p.progress);
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Move dot
+                p.progress += animationSpeed * 0.05; // Speed factor
+
+                // Check segment boundary
+                if(p.progress >= 1) {
+                    p.progress = 0;
+                    p.segment++;
+                    // Loop logic specific to path
+                    if (p.segment >= wirePath.length - 1) {
+                        p.segment = 1; // Loop back to start of wire (skip battery graphical reset)
+                        // Actually, simplified:
+                        p.segment = 0;
+                    }
+                    
+                    // Special logic: Resistor is segment 2 (index 2->3 is resistor gap)
+                    // We just jump the gap visually or Lerp. 
+                    // My getPosition function handles lines between points.
+                }
+            }
+        } else {
+             // If stopped, draw dots static to show "potential"
+             ctx.fillStyle = "#888"; 
+             for(let p of electrons) {
+                let pos = getPositionOnPath(p.segment, p.progress);
+                ctx.beginPath();
+                ctx.arc(pos.x, pos.y, 4, 0, Math.PI * 2);
+                ctx.fill();
+             }
+        }
+
+        requestAnimationFrame(animate);
+    }
+
+    function getPositionOnPath(segmentIndex, progress) {
+        // Linear interpolation between two points in the path
+        let p1 = wirePath[segmentIndex];
+        let nextIndex = (segmentIndex + 1) % wirePath.length;
+        let p2 = wirePath[nextIndex];
+
+        let dx = p2.x - p1.x;
+        let dy = p2.y - p1.y;
+
+        return {
+            x: p1.x + dx * progress,
+            y: p1.y + dy * progress
+        };
+    }
+
+    // Start
+    vinSlider.addEventListener('input', updatePhysics);
+    resSlider.addEventListener('input', updatePhysics);
+    requestAnimationFrame(animate);
+
+</script>
+
+</body>
+</html>
